@@ -1,0 +1,22 @@
+{
+  "host": "0.0.0.0",
+  "port": 8501,
+  "interval": 2,
+  "history_seconds": 1800,
+  "trend_interval": 15,
+  "vllm": {
+    "urls": ["http://127.0.0.1:8000"],
+    "host": "127.0.0.1",
+    "probe_ports": [8000, 8001, 8080, 8081]
+  },
+  "thresholds": {
+    "gpu_util_pct": 95,
+    "gpu_temp_c": 85,
+    "gpu_mem_pct": 99,
+    "mem_pct": 92,
+    "disk_pct": 90,
+    "vllm_waiting": 8,
+    "vllm_kv_pct": 98,
+    "vllm_preemption": 1
+  }
+}

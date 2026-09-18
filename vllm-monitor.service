@@ -1,0 +1,16 @@
+[Unit]
+Description=vLLM Monitor - 本地 AI 部署资源监控面板
+After=network.target
+
+[Service]
+Type=simple
+User=firefly-ai
+WorkingDirectory=/home/firefly-ai/AI/monitor
+ExecStart=/usr/bin/python3 /home/firefly-ai/AI/monitor/vllm_monitor.py --config /home/firefly-ai/AI/monitor/config.json
+Restart=always
+RestartSec=3
+# 轻量进程, 不占 GPU
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

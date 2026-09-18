@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=vLLM 监控日志
+GenericName=监控服务日志
+Comment=查看 vLLM 监控服务运行日志 (journalctl)
+Exec=bash -c "journalctl -u vllm-monitor -n 60 --no-pager; read -p '跟踪日志中, Ctrl+C 停止; 回车关闭... ' _; journalctl -u vllm-monitor -f --no-pager; read -p '按回车关闭...' _"
+Icon=utilities-terminal
+Terminal=true
+Categories=System;Monitor;

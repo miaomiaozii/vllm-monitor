@@ -1,0 +1,1 @@
+firefly-ai ALL=(root) NOPASSWD: /usr/bin/systemctl start vllm-monitor, /usr/bin/systemctl stop vllm-monitor, /usr/bin/systemctl restart vllm-monitor, /usr/bin/systemctl status vllm-monitor, /usr/bin/systemctl is-active vllm-monitor, /usr/bin/systemctl is-enabled vllm-monitor, /usr/bin/systemctl enable vllm-monitor, /usr/bin/systemctl daemon-reload

@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Version=1.0
+Name=vLLM 监控管理
+GenericName=监控服务控制
+Comment=查看状态 / 启动 / 停止 / 重启 vLLM 监控服务
+Exec=bash -c "read -p '选择 [s]tatus [r]estart [t]op [o]pen面板 : ' a; case $a in t) /home/firefly-ai/AI/monitor/monitor.sh stop;; r) /home/firefly-ai/AI/monitor/monitor.sh restart;; o) xdg-open http://192.168.10.155:8501;; *) /home/firefly-ai/AI/monitor/monitor.sh status;; esac; read -p '按回车关闭...' _"
+Icon=system-run
+Terminal=true
+Categories=System;Monitor;
