@@ -1,0 +1,30 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+venv*/
+
+# Runtime
+monitor.db
+monitor.pid
+monitor.log
+*.log
+data/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temporary
+*.tmp
+*.temp

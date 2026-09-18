@@ -1,0 +1,23 @@
+version: '3.8'
+
+services:
+  vllm-monitor:
+    build: .
+    container_name: vllm-monitor
+    restart: unless-stopped
+    network_mode: host
+    pid: host
+    volumes:
+      - ./data:/app/data
+      - /proc:/host/proc:ro
+    # For GPU monitoring, add nvidia runtime:
+    # runtime: nvidia
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: all
+    #           capabilities: [gpu]
+    environment:
+      - PYTHONUNBUFFERED=1
