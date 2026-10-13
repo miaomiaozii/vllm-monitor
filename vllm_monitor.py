@@ -534,6 +534,18 @@ def classify_config(instances):
         return {"id": 6, "name": "方案6 · W8长上下文 + W4×2 短上下文 混合多实例"}
     if ports == {8000, 8001, 8002, 8003}:
         return {"id": 7, "name": "方案7 · 每卡1实例 W4 (8000-8003)"}
+    # Strata (端口 8080+) 与 vLLM 共存的新方案 —— 名称里的编号对齐桌面启动器
+    if any(i.get("engine") == "strata" for i in on):
+        parts = []
+        for i in sorted(on, key=lambda x: _url_port(x["url"])):
+            p = _url_port(i["url"])
+            if i.get("engine") == "strata":
+                e = i.get("strata", {}) or {}
+                parts.append("Strata(%d) %s ctx/%s KV/%s 专家槽"
+                             % (p, e.get("context"), e.get("kv"), e.get("expert_slots")))
+            else:
+                parts.append("%s(%d)" % (i["proc"].get("short", "?"), p))
+        return {"id": 8, "name": "启动器方案7 · " + " + ".join(parts)}
     # 兜底: 端口不匹配已知方案 → 根据实际特征生成描述
     on_sorted = sorted(on, key=lambda i: _url_port(i["url"]))
     parts = []
@@ -604,6 +616,137 @@ class VLLMCollector(BaseCollector):
                 return mm.group(1)
         return default
 
+    def _strata_inst(self, base, d, inst):
+        """Strata 的 /metrics 是 JSON (不是 Prometheus 文本)。映射到监控已有的同一套字段名,
+        这样 UI / 告警 / Token 统计 全部复用 vLLM 那条路径。"""
+        eng = d.get("engine", {}) or {}
+        live = d.get("live", {}) or {}
+        tot = d.get("totals", {}) or {}
+        hw = d.get("hardware", {}) or {}
+        cc = d.get("conversation_cache", {}) or {}
+        inst["engine"] = "strata"
+        inst["online"] = True
+        inst["model"] = eng.get("model") or "?"
+        state = live.get("state") or "idle"
+        inst["state"] = state
+        inst["running"] = 0 if state == "idle" else 1
+        inst["waiting"] = int(live.get("queued") or 0)
+        gm = hw.get("gpu_mem_used") or 0
+        gt = hw.get("gpu_mem_total") or 0
+        # Strata 不报 KV 使用率, 用显存占用百分比代替 (面板上该列语义为“占用”)
+        inst["kv_pct"] = round(gm / gt * 100, 1) if gt else 0.0
+        inst["preemptions"] = 0
+        inst["wait_capacity"] = inst["wait_deferred"] = 0
+        pt = int(tot.get("prompt_tokens") or 0)
+        reused = int(tot.get("reused") or 0)
+        inst["prefix_hit_rate"] = round(reused / max(1, pt) * 100, 1)
+        inst["mm_hit_rate"] = 0.0
+        off = int(tot.get("drafts_offered") or 0)
+        acc = int(tot.get("drafts_accepted") or 0)
+        inst["mtp_accept_rate"] = round(acc / max(1, off) * 100, 1) if off else None
+        inst["mtp_per_pos"] = {}
+        inst["strata"] = {
+            "version": eng.get("engine") or eng.get("version"),
+            "context": eng.get("max_context"),
+            "kv": eng.get("kv"),
+            "kv_resident": eng.get("kv_resident"),
+            "expert_slots": eng.get("expert_slots"),
+            "expert_cache_mib": eng.get("expert_cache_mib"),
+            "spec": eng.get("spec"),
+            "mtp_max": eng.get("mtp_max"),
+            "pool_workers": eng.get("pool_workers"),
+            "vram_free_mib": eng.get("vram_free_mib"),
+            "pcie_frac": eng.get("pcie_frac"),
+            "phase": live.get("phase"),
+            "prompt_read": live.get("prompt_read"),
+            "generated": live.get("generated"),
+            "tok_s": live.get("tok_s"),
+            "tok_s_mean": live.get("tok_s_mean"),
+            "prefill_tok_s_mean": live.get("prefill_tok_s_mean"),
+            "gpu_pcie_gen": hw.get("gpu_pcie_gen"),
+            "gpu_pcie_width": hw.get("gpu_pcie_width"),
+            "gpu_pcie_rx_mb": hw.get("gpu_pcie_rx_mb"),
+            "disk_read_mb": hw.get("disk_read_mb"),
+            "conv_cache_enabled": cc.get("enabled"),
+            "conv_cache_parked": cc.get("parked"),
+            "conv_cache_bytes": cc.get("bytes"),
+            "requests_kept": (d.get("requests_kept")
+                              if isinstance(d.get("requests_kept"), int) else
+                              ((d.get("requests_kept") or {}).get("requests")
+                               if isinstance(d.get("requests_kept"), dict) else None)),
+        }
+        # 增量: 吞吐 + 延迟均值 (Strata 只有累计量, 自己算差值)
+        key = base
+        t = now_ts()
+        prev = self._last.get(key, {})
+        dt = (t - prev["t"]) if prev.get("t") else 0
+
+        def delta(name, cur):
+            p = prev.get(name)
+            return (cur - p) if (p is not None and dt > 0 and cur >= p) else 0.0
+
+        gen = int(tot.get("output_tokens") or 0)
+        rq = int(tot.get("requests") or 0)
+        pm = float(tot.get("prompt_ms") or 0.0)
+        dm = float(tot.get("decode_ms") or 0.0)
+        inst["prompt_total"] = pt
+        inst["gen_total"] = gen
+        inst["requests_total"] = rq
+        inst["gen_toks_s"] = round(delta("s:out", gen) / dt, 1) if dt > 0 else 0
+        inst["prompt_toks_s"] = round(delta("s:prompt", pt) / dt, 1) if dt > 0 else 0
+        d_rq = delta("s:req", rq)
+        inst["ttft_ms"] = round(delta("s:prompt_ms", pm) / d_rq, 0) if d_rq > 0 else None
+        d_gen = delta("s:out", gen)
+        inst["itl_ms"] = round(delta("s:decode_ms", dm) / d_gen, 1) if d_gen > 0 else None
+
+        # 上面的差值法对 Strata 不可靠: totals 是"请求完成才提交"的累计账本, 长请求
+        # 进行中的 2 秒差值恒为 0 (面板 Prefill/Decode 显示 0、TTFT/ITL 显示 — 就是
+        # 这个原因), 而请求完成的那一次差值又会把整段输出算成尖峰 (曾记出 152.2 tok/s
+        # 的假峰值 decode)。所以生成中改用 live 块的实时值, 空闲时改用最近一次已完成
+        # 请求自己的真实数值 (requests 新的在前, 带 prompt_ms/decode_ms/decode_tok_s)。
+        inst["speed_source"] = "delta"
+        live_tok = live.get("tok_s")
+        live_pf = live.get("prefill_tok_s_mean")
+        if state != "idle" and live_tok is not None:
+            inst["gen_toks_s"] = round(float(live_tok), 1)
+            if live_pf is not None and float(live_pf) > 0:
+                inst["prompt_toks_s"] = round(float(live_pf), 1)
+            inst["speed_source"] = "live"
+        else:
+            recent = [r for r in (d.get("requests") or []) if isinstance(r, dict)]
+            if recent:
+                r0 = recent[0]
+                out0 = int(r0.get("output_tokens") or 0)
+                new0 = max(0, int(r0.get("prompt_tokens") or 0)
+                              - int(r0.get("reused") or 0))
+                pms = float(r0.get("prompt_ms") or 0.0)
+                dms = float(r0.get("decode_ms") or 0.0)
+                if r0.get("decode_tok_s"):
+                    inst["gen_toks_s"] = round(float(r0["decode_tok_s"]), 1)
+                if pms > 0 and new0 > 0:
+                    inst["prompt_toks_s"] = round(new0 / (pms / 1000.0), 1)
+                if pms > 0:
+                    inst["ttft_ms"] = round(pms, 0)
+                if dms > 0 and out0 > 0:
+                    inst["itl_ms"] = round(dms / out0, 1)
+                inst["speed_source"] = "last_request"
+        self._last[key] = {"t": t, "s:out": gen, "s:prompt": pt, "s:req": rq,
+                           "s:prompt_ms": pm, "s:decode_ms": dm}
+        # 配置指纹: Strata 的配置在 JSON 里不在 cmdline, 所以从 engine 块合成
+        inst["proc"] = {
+            "pid": None, "model": inst["model"], "served": inst["model"],
+            "tp": (eng.get("gpu_count") or 1),
+            "max_len": int(eng.get("max_context") or 0),
+            "seqs": 1,
+            "batch": None,
+            "gpu_mem_util": None,
+            "mtp_on": bool(eng.get("mtp_max")),
+            "mtp_tokens": int(eng.get("mtp_max") or 0),
+            "cuda_devices": "",
+            "short": "Strata",
+        }
+        return inst
+
     def collect(self):
         instances, any_ok = [], False
         for base in self.urls:
@@ -618,6 +761,14 @@ class VLLMCollector(BaseCollector):
                 continue
             self._seen_online.add(base)
             any_ok = True
+            if text.lstrip()[:1] == "{":
+                # Strata: JSON 指标, 走单独映射分支
+                try:
+                    instances.append(self._strata_inst(base, json.loads(text), inst))
+                except Exception as e:
+                    inst["error"] = "bad_json: %s" % e
+                    instances.append(inst)
+                continue
             m = self._parse_metrics(text)
             model = self._label(m, "vllm:num_requests_running", "model_name") \
                 or self._label(m, "vllm:kv_cache_usage_perc", "model_name")
@@ -662,20 +813,34 @@ class VLLMCollector(BaseCollector):
             inst["prompt_total"] = int(prompt_total)
             inst["gen_total"] = int(gen_total)
             inst["requests_total"] = int(self._get(m, "vllm:request_success_total"))
-            inst["gen_toks_s"] = round(delta("vllm:generation_tokens_total") / dt, 1) if dt > 0 else 0
-            inst["prompt_toks_s"] = round(delta("vllm:prompt_tokens_total") / dt, 1) if dt > 0 else 0
-
-            ttft_d = delta("vllm:time_to_first_token_seconds_sum")
-            ttft_n = delta("vllm:time_to_first_token_seconds_count")
-            inst["ttft_ms"] = round(ttft_d / ttft_n * 1000, 0) if ttft_n > 0 else None
+            # Ratio-of-sums, NOT delta/poll-window. vLLM lands generation_tokens_total
+            # and prompt_tokens_total only when a request finishes, so dividing a whole
+            # request's tokens by one 2 s poll window invents a rate (an 11,736-token
+            # prompt read as 5,868 tok/s when its real prefill took 6.53 s = ~1,800).
+            # tokens / seconds-of-latency is exact for one request and still exact when
+            # summed across concurrent ones.
             itl_d = delta("vllm:inter_token_latency_seconds_sum")
             itl_n = delta("vllm:inter_token_latency_seconds_count")
+            gen_d = delta("vllm:generation_tokens_total")
+            inst["gen_toks_s"] = round(gen_d / itl_d, 1) if itl_d > 0 else 0
+            # prompt_tokens_total counts prefix-cache hits as if they had been
+            # recomputed, so the raw delta inflates prefill speed by the hit ratio
+            # (it recorded a 50,107 tok/s peak on two V100s — impossible; real is
+            # ~1,800-14,500). Subtract the reused tokens, same rule as Strata
+            # (prompt_tokens - reused).
+            new_prompt = max(0.0, delta("vllm:prompt_tokens_total")
+                             - delta("vllm:prefix_cache_hits_total"))
+            ttft_d = delta("vllm:time_to_first_token_seconds_sum")
+            ttft_n = delta("vllm:time_to_first_token_seconds_count")
+            inst["prompt_toks_s"] = round(new_prompt / ttft_d, 1) if ttft_d > 0 else 0
+            inst["ttft_ms"] = round(ttft_d / ttft_n * 1000, 0) if ttft_n > 0 else None
             inst["itl_ms"] = round(itl_d / itl_n * 1000, 0) if itl_n > 0 else None
 
             self._last[key] = {
                 "t": t,
                 "vllm:generation_tokens_total": gen_total,
                 "vllm:prompt_tokens_total": prompt_total,
+                "vllm:prefix_cache_hits_total": self._get(m, "vllm:prefix_cache_hits_total"),
                 "vllm:time_to_first_token_seconds_sum": self._get(m, "vllm:time_to_first_token_seconds_sum"),
                 "vllm:time_to_first_token_seconds_count": self._get(m, "vllm:time_to_first_token_seconds_count"),
                 "vllm:inter_token_latency_seconds_sum": self._get(m, "vllm:inter_token_latency_seconds_sum"),
@@ -743,8 +908,16 @@ def compute_alerts(snap, th):
                 add("warn", "vllm", f"{mdl} 排队 {inst['waiting']} ≥ {th.get('vllm_waiting')}")
             if inst.get("preemptions", 0) >= th.get("vllm_preemption", 1):
                 add("warn", "vllm", f"{mdl} 累计抢占 {inst['preemptions']}")
-            if inst.get("kv_pct") and inst["kv_pct"] >= th.get("vllm_kv_pct", 98):
+            if inst.get("kv_pct") and inst["kv_pct"] >= th.get("vllm_kv_pct", 98) \
+                    and inst.get("engine") != "strata":
+                # Strata 故意把显存填充满放专家缓存, 用显存百分比告警会误报
                 add("warn", "vllm", f"{mdl} KV 缓存 {inst['kv_pct']}% ≥ {th.get('vllm_kv_pct')}%")
+            if inst.get("engine") == "strata":
+                s = inst.get("strata", {}) or {}
+                if s.get("vram_free_mib") is not None and s["vram_free_mib"] < 100:
+                    add("warn", "vllm", f"{mdl} 显存仅剩 {s['vram_free_mib']} MiB")
+                if s.get("phase") and s["phase"] not in ("idle", "generate", "prefill"):
+                    add("warn", "vllm", f"{mdl} 阶段异常: {s['phase']}")
     return alerts
 
 
